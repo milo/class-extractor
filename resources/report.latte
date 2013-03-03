@@ -1,0 +1,111 @@
+{**
+ * Template for PHP ClassExtractor report [https://github.com/milo/class-extractor].
+ * Template use Latte syntax [http://doc.nette.org/en/templating#toc-latte].
+ *
+ * @param array    $classes       classes to extract
+ * @param array    $dpTypes       queried types of dependency
+ * @param array    $dependencies  list of dependencies; result of ClassExtractor\Dependencies::queryClass()
+ * @param DateTime $created       report created time
+ *}
+<!DOCTYPE HTML>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>Dependencies of {$classes|implode:', '}</title>
+		<style>
+			body {
+				font-size: 12px;
+				font-family: Verdana,'Geneva CE',lucida,sans-serif;
+				margin: 1em;
+				background-color: white;
+			}
+
+			header {
+				border-bottom: 1px solid #777;
+				padding-bottom: 1.5em;
+			}
+
+			footer {
+				margin-top: 1.5em;
+				border-top: 1px solid #777;
+				padding-top: 1.5em;
+				font-size: 80%;
+				color: #888;
+			}
+
+			table {
+				border-collapse: collapse;
+			}
+
+			th {
+				padding-top: 1.5em;
+				text-align: left;
+				font-weight: normal;
+			}
+
+			h1, th span {
+				font-size: 20px;
+				font-family: 'Trebuchet MS','Geneva CE',lucida,sans-serif;
+				font-weight: bold;
+			}
+
+			h1 {
+				margin: 1em 0 .2em;
+			}
+
+			tr:hover td {
+				background-color: #eee;
+			}
+
+			td {
+				padding: .1em .2em;
+			}
+
+			td.type {
+				text-align: right;
+				padding-left: 5em;
+			}
+
+			header span, td.type, td.class span {
+				color: #777;
+				font-size: 90%;
+			}
+
+			a {
+				color: #2E5CB8;
+				text-decoration: none;
+				margin: 0 -2px;
+				padding: 2px;
+				border-radius: 2px;
+			}
+
+			a:hover {
+				color: white;
+				background-color: #2E5CB8;
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<h1 n:inner-foreach="$classes as $className"><a n:tag-if="isset($dependencies[strtolower($className)])" href="#class-{$className |webalize}">{$className}</a>{sep}, {/sep}</h1>
+			{foreach $dpTypes as $type}<span>{$type}</span>{sep}, {/sep}{/foreach}
+		</header>
+
+		<table n:inner-foreach="$dependencies as $lowerClass => $dp">
+			<tr>
+				<th colspan="3" id="class-{$lowerClass |webalize}"><span>{$dp->name}</span> {if count($dp->where)}depends on{else}has no dependencies{/if}</th>
+			</tr>
+			<tr n:foreach="$dp->where as $where">
+				<td class="type">{$where->type}</td>
+				<td class="class"><a n:tag-if="isset($dependencies[strtolower($where->class)])" href='#class-{$where->class |webalize}'>{$where->class}</a>{ifset $where->method} <span>in {$where->method}()</span>{/ifset}</td>
+			</tr>
+		</table>
+		<p n:if="empty($dependencies)">
+			(not found)
+		</p>
+
+		<footer>
+			Created {$created |date:'j.n.Y H:i:s'} by <a href="https://github.com/milo/class-extractor">Class Extractor</a>
+		</footer>
+	</body>
+</html>

@@ -3,339 +3,440 @@
 namespace ClassExtractor;
 
 use Nette,
-	Nette\Utils\Json;
+	ClassExtractor\CaseInsensitiveString AS CIString;
 
 
 
-/**
- * Class for building dependecies tree between PHP classes (and interfaces).
- *
- * @author  Miloslav Hůla
- *
- * @method  mixed foundExtends($class)
- * @method  mixed foundImplements($class)
- * @method  mixed foundInstanceOf($class)
- * @method  mixed foundNewOperator($class)
- * @method  mixed foundStaticCall($class)
- * @method  mixed foundTypehint($class)
- */
 class Dependencies extends Nette\Object
 {
-	const VERSION = 'alfa4';
+	const
+		VERSION = 'alfa6';
 
+	/** Type of dependency. */
+	const
+		TYPE_EXTENDS = 'extends',
+		TYPE_IMPLEMENTS = 'implements',
+		TYPE_INSTANCE_OF = 'instanceOf',
+		TYPE_NEW_OPERATOR = 'newOperator',
+		TYPE_STATIC_CALL = 'staticCall',
+		TYPE_TYPEHINT = 'typehint';
+
+	/**
+	 * Dependencies tree array keys.
+	 * @internal
+	 */
+	const
+		CLASSES = 'classes',
+		METHODS = 'methods',
+		FUNCTIONS = 'functions',
+		NAME = 'name',
+		DEPENDENCIES = 'dependencies';
+
+	/** @var Reporter */
 	private $reporter;
 
-	/** @var  mixed  reference to $this->files or $this->stack */
-	private $current;
-
-	/** @internal */
-	private $global;
-
-	/** @var string  current PHP file path */
-	private $currentFile;
-
-	/** @var array[path]  dependecies incoming from file context */
+	/**
+	 * @var array  structure for dependencies
+	 * <code>
+	 * $files => array(
+	 *     fullFilePath => array(
+	 *         self::DEPENDENCIES => array(...),
+	 *         self::CLASSES => array(
+	 *             lowerClassName => array(
+	 *                 self::NAME => 'originalClassName',
+	 *                 self::DEPENDENCIES => array(...),
+	 *                 self::METHODS => array(
+	 *                     lowerMethodName => array(
+	 *                         self::NAME => 'originalMethodName',
+	 *                         self::DEPENDENCIES => array(...),
+	 *                     ),
+	 *                 ),
+	 *             ),
+	 *         ),
+	 *         self::FUNCTIONS => array(
+	 *             lowerFunctionName => array(
+	 *                 self::NAME => 'originalFunctionName',
+	 *                 self::DEPENDENCIES => array(...),
+	 *             ),
+	 *         ),
+	 *     ),
+	 * );
+	 * </code>
+	 * where every self::DEPENDENCIES array is:
+	 * <code>
+	 * array(
+	 *     self::TYPE_EXTENDS => array(lowerClassName => originalClassName),
+	 *     self::TYPE_... => ...
+	 * )
+	 * </code>
+	 */
 	private $files = array();
 
-	/** @var array[className]  dependecies incoming from class context */
+	/** @var array[lowerClassName => fullFilePath] index */
 	private $classes = array();
 
+	/** @var array[lowerFunctionName => fullFilePath] index */
+	private $functions = array();
+
+	/** @var array  dependencies from ignored code */
+	private $trash;
+
+
+
+	/** @var string|NULL  just now scanned file path */
+	private $inFile;
+
+	/** @var CIString  just now scanned class name */
+	private $inClass;
+
+	/** @var CIString  just now scanned function/method name */
+	private $inFunction;
+
+	/** @var reference to any of $this->files self::DEPENDENCIES array */
+	private $current;
+
 	/** @var array of $this->current references */
-	private $stack = array();
+	private $stack;
 
-	/** @var array[low className => className]  ignored classes */
-	private $ignore = array();
 
-	/** @var bool[type]  which dependecy types count when building dependecy tree */
-	public static $types = array(
-		'extends' => TRUE,
-		'implements' => TRUE,
-		'instanceOf' => TRUE,
-		'newOperator' => TRUE,
-		'staticCall' => TRUE,
-		'typehint' => TRUE,
-	);
+
+	/** @var array[lowerClassName => TRUE]  class ignored during dependency queries */
+	private $ignoredClasses = array();
 
 
 
 	public function __construct(Reporter $reporter)
 	{
 		$this->reporter = $reporter;
-		$this->current = & $this->global;
+		$this->current = & $this->trash;
 	}
 
 
 
 	/**
-	 * Enters into new file context.
-	 * @param  string
-	 * @return self
+	 * Sets classes which will be ignored during dependency queries.
+	 * @param  string[]
 	 */
-	public function entryFile($path)
+	public function setIgnoredClasses(array $classNames)
 	{
-		$this->stack[] = & $this->current;
-		$this->current = & $this->files[$path];
-		$this->currentFile = $path;
-		return $this;
+		$this->ignoredClasses = array();
+		foreach ($classNames as $name) {
+			$this->ignoredClasses[strtolower($name)] = TRUE;
+		}
 	}
 
 
 
 	/**
-	 * Leaves current file context.
-	 * @return self
+	 * Adds all dependencies from file.
+	 * @param  string  path to file
+	 * @return bool
 	 */
-	public function leaveFile()
+	public function addFile($path)
 	{
-		$this->currentFile = NULL;
-		return $this->leave();
-	}
-
-
-
-	/**
-	 * Enters into class definition context.
-	 * @param  string  absolute class name (with full namespace)
-	 * @return self
-	 */
-	public function entryClass($class)
-	{
-		$this->stack[] = & $this->current;
-		$this->current = & $this->classes[strtolower($class)];
-
-		if (isset($this->current['definedIn'])) {
-			$this->reporter->warning("Class '$class' is defined multiple times in files '{$this->currentFile}' and '{$this->current['definedIn']}'. Skipping the second one.");
-		} else {
-			$this->current['definedIn'] = $this->currentFile;
+		if ($this->enterFile($path) === FALSE) {
+			return FALSE;
 		}
 
-		return $this;
+		$namespace = new NamespaceContext;
+		$parser = new PhpParser(file_get_contents($path));
+
+		$blockLevel = 0;
+		$classBlockLevel = $functionBlockLevel = NULL;
+		$nextBlockIsFunction = FALSE;
+
+		/** Inspired by https://github.com/nette/build-tools/blob/master/tasks/convert52.php#L77 */
+		while (($token = $parser->fetch()) !== FALSE) {
+			// {
+			if ($parser->isCurrent('{', T_DOLLAR_OPEN_CURLY_BRACES)) {
+				if ($nextBlockIsFunction) {
+					$nextBlockIsFunction = FALSE;
+					$functionBlockLevel = $blockLevel;
+				}
+
+				$blockLevel++;
+
+			// } but not in "{$var }"
+			} elseif ($parser->isCurrent('}') && !$parser->isCurrent(T_ENCAPSED_AND_WHITESPACE)) {
+				$blockLevel--;
+
+				if ($classBlockLevel === $blockLevel) {
+					if ($nextBlockIsFunction) { // abstract method without body
+						$nextBlockIsFunction = FALSE;
+						$this->leaveFunction();
+					}
+
+					$classBlockLevel = NULL;
+					$this->leaveClass();
+
+				} elseif ($functionBlockLevel === $blockLevel) {
+					$functionBlockLevel = NULL;
+					$this->leaveFunction();
+				}
+
+			// namespace NAMESPACE;
+			} elseif ($parser->isCurrent(T_NAMESPACE)) {
+				$namespace->enter($parser->fetchAll(T_STRING, T_NS_SEPARATOR));
+
+			// use NAMESPACE\CLASS [as NAMESPACE\ALIAS], but skip use closure keyword
+			} elseif ($parser->isCurrent(T_USE) && !$parser->isNext('(')) {
+				do {
+					$class = $parser->fetchAll(T_STRING, T_NS_SEPARATOR);
+					$alias = $parser->fetch(T_AS) ? $parser->fetch(T_STRING) : substr($class, strrpos("\\$class", '\\'));
+					$namespace->setAlias($class, $alias);
+				} while ($parser->fetch(','));
+				$parser->fetch(';');
+
+			// class CLASS, interface CLASS
+			} elseif ($parser->isCurrent(T_CLASS, T_INTERFACE)) {
+				$class = $namespace->absolutize($parser->fetchAll(T_STRING, T_NS_SEPARATOR), FALSE);
+				$classBlockLevel = $blockLevel;
+				$this->enterClass($class);
+
+				// extends NAMESPACE\CLASS
+				if ($parser->fetch(T_EXTENDS)) {
+					do {
+						$class = $parser->fetchAll(T_STRING, T_NS_SEPARATOR);
+						$this->found(self::TYPE_EXTENDS, $namespace->absolutize($class));
+					} while ($parser->fetch(','));
+				}
+
+				// implements NAMESPACE\CLASS
+				if ($parser->fetch(T_IMPLEMENTS)) {
+					do {
+						$class = $parser->fetchAll(T_STRING, T_NS_SEPARATOR);
+						$this->found(self::TYPE_IMPLEMENTS, $namespace->absolutize($class));
+					} while ($parser->fetch(','));
+				}
+
+			// function FUNCTION, but skip closure
+			} elseif ($parser->isCurrent(T_FUNCTION) && !$parser->isNext('(')) {
+				if ($nextBlockIsFunction) { // abstract method without body
+					$this->leaveFunction();
+				}
+
+				$parser->fetch('&');
+				$function = $parser->fetch(T_STRING);
+				$nextBlockIsFunction = TRUE;
+
+				if ($this->inClass === NULL) {
+					$function = $namespace->absolutize($function);
+				}
+				$this->enterFunction($function);
+
+			// instanceof NAMESPACE\CLASS, new NAMESPACE\CLASS
+			} elseif ($parser->isCurrent(T_INSTANCEOF, T_NEW)) {
+				$type = $parser->isCurrent(T_INSTANCEOF) ? self::TYPE_INSTANCE_OF : self::TYPE_NEW_OPERATOR;
+				if (($class = $parser->fetchAll(T_STRING, T_NS_SEPARATOR)) && $class !== 'self' && $class !== 'parent') {
+					$this->found($type, $namespace->absolutize($class));
+				}
+
+			// NAMESPACE\CLASS:: or function(NAMESPACE\CLASS $var)
+			} elseif ($parser->isCurrent(T_STRING, T_NS_SEPARATOR)) { // Class:: or typehint
+				$class = $token . $parser->fetchAll(T_STRING, T_NS_SEPARATOR);
+
+				if ($class !== 'self' && $class !== 'parent') {
+					if ($parser->isNext(T_DOUBLE_COLON)) {
+						$this->found(self::TYPE_STATIC_CALL, $namespace->absolutize($class));
+
+					} elseif ($parser->isNext(T_VARIABLE)) {
+						$this->found(self::TYPE_TYPEHINT, $namespace->absolutize($class));
+					}
+				}
+			}
+		}
+
+		/** @todo $parser->isCurrent(T_CONSTANT_ENCAPSED_STRING) = class name in string */
+		/** @todo class_alias() */
+		/** @todo traits - not so easy with all traits aliasing */
+		/** @todo namespace {} = namespace enclosed in block */
+		/** @todo line counter? */
+
+		$this->leaveFile();
+
+		return TRUE;
 	}
 
 
 
 	/**
-	 * Leaves class definition context.
-	 * @return self
+	 * Enters into file.
+	 * @param  string
+	 * @return bool  FALSE when already entered
 	 */
-	public function leaveClass()
+	private function enterFile($path)
 	{
-		return $this->leave();
+		if (isset($this->files[$path])) {
+			return FALSE;
+		}
+
+		$this->inFile = $path;
+
+		if ($this->inClass !== NULL) {
+			$this->reporter->warning("Entering into file '$path' but still in class '{$this->inClass->raw}' definition.");
+		}
+
+		if ($this->inFunction !== NULL) {
+			$this->reporter->warning("Entering into file '$path' but still in function '{$this->inFunction->raw}' definition.");
+		}
+
+		$this->stack[] = & $this->current;
+		$this->current = & $this->files[$path][self::DEPENDENCIES];
+
+		return TRUE;
 	}
 
 
 
-	private function leave()
+	/**
+	 * Leaves file.
+	 */
+	private function leaveFile()
+	{
+		$this->inFile = NULL;
+		$this->popStack();
+	}
+
+
+
+	/**
+	 * Enters into class definition.
+	 * @param  string  class name
+	 */
+	private function enterClass($name)
+	{
+		$this->inClass = $class = new CIString($name);
+
+		$this->stack[] = & $this->current;
+
+		if ($this->inFile === NULL) {
+			$this->reporter->warning("Entering into class '$name' but not in file. Ignoring the class.");
+			$this->current = & $this->trash;
+
+		} elseif (isset($this->classes[$class->lower])) {
+			$this->reporter->warning("Class '$name' is already defined in '{$this->classes[$class->lower]}'. Ignoring the definition from '$this->inFile'.");
+			$this->current = & $this->trash;
+
+		} else {
+			$this->classes[$class->lower] = $this->inFile;
+
+			$ref = & $this->files[$this->inFile][self::CLASSES][$class->lower];
+			$ref[self::NAME] = $class->raw;
+			$this->current = & $ref[self::DEPENDENCIES];
+		}
+	}
+
+
+
+	/**
+	 * Leaves class definition.
+	 */
+	private function leaveClass()
+	{
+		$this->inClass = NULL;
+		$this->popStack();
+		$this->flushTrash();
+	}
+
+
+
+	/**
+	 * Enters into function/method definition.
+	 * @param  string  function/method name
+	 */
+	private function enterFunction($name)
+	{
+		$this->inFunction = $function = new CIString($name);
+
+		$this->stack[] = & $this->current;
+
+		if ($this->inClass === NULL) { // global function
+			if ($this->inFile === NULL) {
+				$this->reporter->warning("Entering into function '$name()' but not in file. Ignoring the function.");
+				$this->current = & $this->trash;
+
+			} elseif (isset($this->functions[$function->lower])) {
+				$this->reporter->warning("Function '$name()' is already defined in '{$this->functions[$function->lower]}'. Ignoring the definition from '$this->inFile'.");
+				$this->current = & $this->trash;
+
+			} else {
+				$this->functions[$function->lower] = $this->inFile;
+
+				$ref = & $this->files[$this->inFile][self::FUNCTIONS][$function->lower];
+				$ref[self::NAME] = $function->raw;
+				$this->current = & $ref[self::DEPENDENCIES];
+			}
+
+		} else { // class method
+			if ($this->inFile === NULL) {
+				$this->reporter->warning("Entering into method '{$this->inClass->raw}::$name()' but not in file. Ignoring the method.");
+				$this->current = & $this->trash;
+
+			} else {
+				$ref = & $this->files[$this->inFile][self::CLASSES][$this->inClass->lower][self::METHODS][$function->lower];
+				$ref[self::NAME] = $function->raw;
+				$this->current = & $ref[self::DEPENDENCIES];
+			}
+		}
+	}
+
+
+
+	/**
+	 * Leaves current class definition.
+	 */
+	private function leaveFunction()
+	{
+		$this->inFunction = NULL;
+		$this->popStack();
+		$this->flushTrash();
+	}
+
+
+
+	/**
+	 * Pops last dependencies array reference from stack.
+	 */
+	private function popStack()
 	{
 		if (count($this->stack) < 1) {
 			$this->reporter->warning(__METHOD__ . '(): Stack is empty');
-			$this->current = & $this->global;
+			$this->current = & $this->trash;
 
 		} else {
 			$idx = count($this->stack) - 1;
 			$this->current = & $this->stack[$idx];
 			array_pop($this->stack);
 		}
-
-		return $this;
 	}
 
 
 
 	/**
-	 * Found some dependecy type.
-	 * @see self::$types
-	 * @param  string  foundExtends, foundStaticCall, ...
-	 * @param  array  class name
-	 * @return mixed
+	 * Cleans dependencies from ignored code.
 	 */
-	public function __call($name, $args)
+	private function flushTrash()
 	{
-		if (preg_match('#^found([A-Z][a-zA-Z]*)$#', $name, $m) && array_key_exists($key = lcfirst($m[1]), self::$types)) {
-			foreach ($args as $arg) {
-				$this->found($key, $arg);
-			}
-			return $this;
-		}
-
-		return parent::__call($name, $args);
-	}
-
-
-
-	private function found($type, $class)
-	{
-		$this->current[$type][strtolower($class)] = $class;
-		return $this;
+		$this->trash = NULL;
 	}
 
 
 
 	/**
-	 * Adds classes which will be ignored when building dependecy tree.
-	 * Main purpose is for PHP internal classes and interfaces.
-	 * @param  string|array
-	 * @return self
+	 * Adds new dependency to the list.
+	 * @param  string  type of dependency (self::TYPE_*)
+	 * @param  string  class name
 	 */
-	public function addIgnore($classes)
+	private function found($type, $className)
 	{
-		foreach ((array) $classes as $class) {
-			$this->ignore[strtolower($class)] = $class;
-		}
-		return $this;
-	}
-
-
-
-
-	/**
-	 * Returns all dependent classes/interfaces for $classNames.
-	 * @param  string|array
-	 * @return string[]  class/interfaces names.
-	 */
-	public function getFor($classNames)
-	{
-		$result = array();
-		$this->find(is_array($classNames) ? $classNames : func_get_args(), $result);
-		return array_values($result);
-	}
-
-
-
-	private function find(array $classes, array &$result)
-	{
-		foreach ($classes as $camelName) {
-			$class = strtolower($camelName);
-
-			if (isset($result[$class]) || isset($this->ignore[$class])) { // cyclic
-				continue;
-			}
-
-			if (!isset($this->classes[$class])) {
-				$this->reporter->error("Definition of '$camelName' not found.");
-				continue;
-			}
-
-			$result[$class] = $camelName;
-
-			foreach (self::$types as $type => $enabled) {
-				if (isset($this->classes[$class][$type]) && $enabled) {
-					$this->find($this->classes[$class][$type], $result);
-				}
-			}
-		}
-
-		return $this;
+		$class = new CIString($className);
+		$this->current[$type][$class->lower] = $class->raw;
 	}
 
 
 
 	/**
-	 * Map class names to definition files name.
-	 * @param  string|array
-	 * @return string[]  file names
-	 */
-	public function mapToFileNames($classNames)
-	{
-		$classes = is_array($classNames) ? $classNames : func_get_args();
-		$result = array();
-		foreach ($classes as $camelName) {
-			$class = strtolower($camelName);
-
-			if (!isset($this->classes[$class])) {
-				$this->reporter->error("Cannot find '$camelName' definition.");
-				continue;
-			}
-
-			if (!isset($this->classes[$class]['definedIn'])) {
-				$this->reporter->error("Definition file for '$camelName' not found.");
-				continue;
-			}
-
-			$result[$this->classes[$class]['definedIn']] = 1;
-		}
-
-		return array_keys($result);
-	}
-
-
-
-	/** @internal */
-	public function buildTree($classNames)
-	{
-		$classes = is_array($classNames) ? $classNames : func_get_args();
-
-		$antiLoop = $result = array();
-		$this->build($classes, $result, $antiLoop);
-
-		return $result;
-	}
-
-
-
-	private function build(array $classes, array &$result, array &$antiLoop)
-	{
-		foreach ($classes as $camelName) {
-			$class = strtolower($camelName);
-
-			if (isset($result[$class])) {
-				continue;
-			}
-
-			if (isset($this->ignore[$class])) {
-				//$result[$class] = '*IGNORED*';
-				continue;
-			}
-
-			if (isset($antiLoop[$class])) {
-				$result[$class] = array(
-					'class' => $camelName,
-					'children' => '*RECURSION*',
-				);
-				continue;
-			}
-
-			$result[$class] = array(
-				'class' => $camelName,
-				'children' => array(),
-			);
-			$antiLoop[$class] = 1;
-			foreach (self::$types as $type => $enabled) {
-				if (isset($this->classes[$class][$type]) && $enabled) {
-					$this->build($this->classes[$class][$type], $result[$class]['children'], $antiLoop);
-				}
-			}
-			array_pop($antiLoop);
-		}
-
-		return $this;
-	}
-
-
-
-	/** @internal */
-	public static function printTree($tree, $space = "|   ", $level = 0)
-	{
-		foreach ($tree as $leaf) {
-			echo str_repeat($space, $level);
-			echo $leaf['class'];
-			if (is_string($leaf['children'])) {
-				echo " => $leaf[children]\n";
-
-			} elseif ($cnt = count($leaf['children'])) {
-				echo " ($cnt)\n";
-				self::printTree($leaf['children'], $space, $level + 1);
-
-			} else {
-				echo "\n";
-			}
-		}
-	}
-
-
-
-	/**
-	 * Stores current dependecy tree into file.
+	 * Store found dependencies into files.
 	 * @param  string  path
 	 * @return bool
 	 */
@@ -343,20 +444,16 @@ class Dependencies extends Nette\Object
 	{
 		$data = array(
 			self::VERSION,
-			$this->current,
-			$this->global,
-			$this->currentFile,
 			$this->files,
 			$this->classes,
-			$this->stack,
-			$this->ignore,
+			$this->functions,
 		);
 
 		$code = "<?php\n\n\$data = " . var_export($data, TRUE) . ';';
 
 		if (@file_put_contents($file, $code) === FALSE) {
 			$err = error_get_last();
-			$this->reporter->warning("Cannot store dependency tree to '$file': $err[message]");
+			$this->reporter->warning("Cannot store dependencies to '$file': $err[message]");
 			return FALSE;
 		}
 
@@ -367,12 +464,16 @@ class Dependencies extends Nette\Object
 
 
 	/**
-	 * Restores dependecy tree from file.
+	 * Restore dependencies from file.
 	 * @return bool
 	 */
 	public function restore($file)
 	{
-		if (!@include $file) {
+		if (!is_file($file)) {
+			$this->reporter->notice("Cannot restore dependency tree from '$file'. File not exists.");
+			return FALSE;
+
+		} elseif (!@include $file) {
 			$err = error_get_last();
 			$this->reporter->warning("Cannot restore dependency tree from '$file': $err[message]");
 			return FALSE;
@@ -387,17 +488,135 @@ class Dependencies extends Nette\Object
 		}
 
 		list(
-			$foo,
-			$this->current,
-			$this->global,
-			$this->currentFile,
+			$version,
 			$this->files,
 			$this->classes,
-			$this->stack,
-			$this->ignore) = $data;
+			$this->functions
+		) = $data;
 
 		$this->reporter->notice("Dependency tree restored from '$file'.");
 		return TRUE;
+	}
+
+
+
+	/**
+	 * Query for class dependencies.
+	 * @param  string|array  class name(s)
+	 * @param  array of self::TYPE_?  types of dependency
+	 * @return array|FALSE
+	 */
+	public function queryClass($names, array $types)
+	{
+		$types = array_fill_keys($types, TRUE);
+
+		$result = array();
+		foreach ((array) $names as $name) {
+			$class = new CIString($name);
+			if (!isset($this->classes[$class->lower])) {
+				$this->reporter->notice("Definition of '$name' class not found.");
+				continue;
+			}
+
+			$this->collectClass($class, $types, $result);
+		}
+
+		return $result;
+	}
+
+
+
+	private function collectClass(CIString $class, array $types, array & $result)
+	{
+		if (isset($this->ignoredClasses[$class->lower])) {
+			return;
+		}
+
+		if (!isset($this->classes[$class->lower])) {
+			$this->reporter->error("Definition of '$class->raw' class not found.");
+			return;
+		}
+
+		if (!isset($result[$class->lower])) {
+			$result[$class->lower] = (object) array(
+				'name' => $class->raw,
+				'where' => array(),
+			);
+		}
+
+		$file = $this->classes[$class->lower];
+		if (isset($this->files[$file][self::CLASSES][$class->lower][self::DEPENDENCIES])) {
+			foreach ($this->files[$file][self::CLASSES][$class->lower][self::DEPENDENCIES] as $type => $dependencies) {
+				if (!isset($types[$type])) {
+					continue;
+				}
+
+				foreach ($dependencies as $lowerClass => $camelClass) {
+					if (isset($this->ignoredClasses[$lowerClass])) {
+						continue;
+					}
+
+					$key = "$lowerClass:$type";
+					if (!isset($result[$class->lower]->where[$key])) {
+						$result[$class->lower]->where[$key] = (object) array(
+							'type' => $type,
+							'class' => $camelClass,
+						);
+
+						$this->collectClass(new CIString($camelClass), $types, $result);
+					}
+				}
+			}
+		}
+
+		if (isset($this->files[$file][self::CLASSES][$class->lower][self::METHODS])) {
+			foreach ($this->files[$file][self::CLASSES][$class->lower][self::METHODS] as $lowerMethod => $method) {
+				if (isset($method[self::DEPENDENCIES])) {
+					foreach ($method[self::DEPENDENCIES] as $type => $dependencies) {
+						if (!isset($types[$type])) {
+							continue;
+						}
+
+						foreach ($dependencies as $lowerClass => $camelClass) {
+							if (isset($this->ignoredClasses[$lowerClass])) {
+								continue;
+							}
+
+							$key = "$lowerClass:$type:$lowerMethod";
+							if (!isset($result[$class->lower]->where[$key])) {
+								$result[$class->lower]->where[$key] = (object) array(
+									'type' => $type,
+									'class' => $camelClass,
+									'method' => $method[self::NAME],
+								);
+
+								$this->collectClass(new CIString($camelClass), $types, $result);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+
+
+	/**
+	 * Maps class name(s) to file name(s).
+	 * @param  string|array  class name(s)
+	 * @return array  file names
+	 */
+	public function mapToFileNames($classNames)
+	{
+		$files = array();
+		foreach ((array) $classNames as $name) {
+			if (isset($this->classes[$name])) {
+				$file = $this->classes[$name];
+				$files[$file] = $file;
+			}
+		}
+
+		return array_values($files);
 	}
 
 }

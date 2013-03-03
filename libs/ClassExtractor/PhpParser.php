@@ -7,7 +7,7 @@ use Nette\Utils\Tokenizer;
 
 
 /**
- * Simple but powerful PHP code tokenizer. Stolen from Nette buil-tools.
+ * Simple but powerful PHP code tokenizer. Stolen from Nette build-tools.
  * 
  * @see https://github.com/nette/build-tools/blob/master/tasks/convert52.php#L201
  */

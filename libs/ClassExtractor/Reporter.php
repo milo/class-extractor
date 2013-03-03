@@ -7,7 +7,7 @@ use Nette;
 
 
 /**
- * Just more comfortable stdout printing.
+ * Just more comfortable stdout and stderr printing.
  *
  * @author  Miloslav Hůla
  */
@@ -17,6 +17,24 @@ class Reporter extends Nette\Object
 		NOTICE = 'notice',
 		WARNING = 'warning',
 		ERROR = 'error';
+
+	private $lastLineLength = 0;
+
+
+
+	public function stdout($msg)
+	{
+		echo $msg;
+		return $this;
+	}
+
+
+
+	public function stderr($msg)
+	{
+		file_put_contents('php://stderr', $msg, FILE_APPEND);
+		return $this;
+	}
 
 
 
@@ -43,15 +61,28 @@ class Reporter extends Nette\Object
 
 	protected function report($level, $msg)
 	{
-		$msg = "[$level] $msg";
+		$this->cleanLine();
+		return $this->stdout("[$level] $msg" . PHP_EOL);
+	}
 
-		if (PHP_SAPI === 'cli') {
-			echo $msg . PHP_EOL;
-		} else {
-			echo "<pre>$msg</pre>\n";
+
+
+	public function cleanLine()
+	{
+		if ($this->lastLineLength !== 0) {
+			$this->stdout("\r" . str_repeat(' ', $this->lastLineLength) . "\r");
+			$this->lastLineLength = 0;
 		}
-
 		return $this;
+	}
+
+
+
+	public function lineMessage($msg)
+	{
+		$this->cleanLine();
+		$this->lastLineLength = strlen($msg = rtrim($msg));
+		return $this->stdout($msg);
 	}
 
 }

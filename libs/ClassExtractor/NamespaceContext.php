@@ -8,17 +8,46 @@ use Nette;
 
 /**
  * @author  Miloslav Hůla
-*/
-class PhpFileContext extends Nette\Object
+ */
+class NamespaceContext extends Nette\Object
 {
-	/** @var string  current namespace definition */
-	public $namespace = '';
+	/** @var string  current namespace name */
+	protected $namespace = '';
 
-	/** @var string[]  namespace aliases */
-	public $aliases = array();
+	/** @var string[]  namespace class aliases */
+	protected $aliases = array();
 
-	/** @var current  block level in file */
-	public $blockLevel = 0;
+
+
+	public function __toString()
+	{
+		return $this->namespace;
+	}
+
+
+
+	/**
+	 * Enters to namespace.
+	 * @param  string
+	 * @return self
+	 */
+	public function enter($namespace)
+	{
+		$this->namespace = (string) $namespace;
+	}
+
+
+
+	/**
+	 * Leaves namespace.
+	 * @return string  old namespace
+	 */
+	 public function leave()
+	 {
+	 	$old = $this->namespace;
+	 	$this->namespace = '';
+	 	return $old;
+	 }
 
 
 
@@ -37,7 +66,7 @@ class PhpFileContext extends Nette\Object
 
 
 	/**
-	 * Expands class name to full path with current namespace.
+	 * Expands class name to full name with namespace.
 	 * @param  string
 	 * @param  bool  search in aliases
 	 * @return string  expanded identifier
