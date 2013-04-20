@@ -502,7 +502,7 @@ class Dependencies extends Nette\Object
 
 	/**
 	 * Query for class dependencies.
-	 * @param  string|array  class name(s)
+	 * @param  string|array  class name(s), possible with '*' wildcard
 	 * @param  array of self::TYPE_?  types of dependency
 	 * @return array|FALSE
 	 */
@@ -511,14 +511,45 @@ class Dependencies extends Nette\Object
 		$types = array_fill_keys($types, TRUE);
 
 		$result = array();
-		foreach ((array) $names as $name) {
-			$class = new CIString($name);
-			if (!isset($this->classes[$class->lower])) {
-				$this->reporter->notice("Definition of '$name' class not found.");
-				continue;
-			}
-
+		foreach ($this->expandClassNames((array) $names) as $class) {
 			$this->collectClass($class, $types, $result);
+		}
+
+		return $result;
+	}
+
+
+
+	/**
+	 * Expand wildcards in class names and filter outs not defined one.
+	 * @param  array  class names
+	 * @return CIString[]
+	 */
+	private function expandClassNames(array $names)
+	{
+		$result = array();
+		foreach ($names as $name) {
+			$class = new CIString($name);
+			if (isset($this->classes[$class->lower])) {
+				$result[$class->lower] = $class;
+
+			} elseif (strpos($class->lower, '*') === FALSE) {
+				$this->reporter->notice("Definition of '$name' class not found.");
+
+			} else {
+				$re = '(^' . strtr(preg_quote($class->lower), array('\\*' => '.*')) . '$)';
+				$found = FALSE;
+				foreach ($this->classes as $lowerClass => $file) {
+					if (preg_match($re, $lowerClass)) {
+						$found = TRUE;
+						$result[$lowerClass] = new CIString($this->files[$file][self::CLASSES][$lowerClass][self::NAME]);
+					}
+				}
+
+				if (!$found) {
+					$this->reporter->notice("Definition '$name' does not match to any class.");
+				}
+			}
 		}
 
 		return $result;
