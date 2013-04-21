@@ -24,6 +24,8 @@ $dpTypes = array(
 	CE\Dependencies::TYPE_NEW_OPERATOR,
 	CE\Dependencies::TYPE_STATIC_CALL,
 	CE\Dependencies::TYPE_TYPEHINT,
+	CE\Dependencies::TYPE_REQUIRE,
+	CE\Dependencies::TYPE_INCLUDE,
 );
 
 
@@ -184,10 +186,27 @@ if ($verbose) {
 
 
 
+// Strip source dir from file name
+$fnStripSrc = function($file) use ($srcDirs) {
+	foreach ($srcDirs as $srcDir) {
+		if (is_file($srcDir)) {
+			$srcDir = dirname($srcDir);
+		}
+
+		if (strpos($file, $dir = dirname($srcDir)) === 0) {
+			return substr($file, strlen($dir) + 1);
+		}
+	}
+	return FALSE;
+};
+
+
+
 if ($reportFile) {
 	$template = new Nette\Templating\FileTemplate(__DIR__ . '/resources/report.latte');
 	$template->registerFilter(new Nette\Latte\Engine);
 	$template->registerHelperLoader(array('Nette\Templating\Helpers', 'loader'));
+	$template->registerHelper('stripSrcDir', $fnStripSrc);
 
 	$template->classes = $extractClasses;
 	$template->dpTypes = $dpTypes;
@@ -208,30 +227,23 @@ if (!empty($dstDir)) {
 	$fnCopy = function($srcFile, $dstFile) {
 		$dstDir = dirname($dstFile);
 		if (!is_dir($dstDir)) {
-			mkdir($dstDir, 0777, TRUE);
+			mkdir($dstDir, 0755, TRUE);
 		}
 		copy($srcFile, $dstFile);
 	};
-
-	$fnStripSrc = function($file) use ($srcDirs) {
-		foreach ($srcDirs as $srcDir) {
-			if (is_file($srcDir)) {
-				$srcDir = dirname($srcDir);
-			}
-
-			if (strpos($file, $dir = dirname($srcDir)) === 0) {
-				return substr($file, strlen($dir));
-			}
-		}
-		return FALSE;
-	};
-
 
 	if (count(glob($dstDir . DIRECTORY_SEPARATOR . '*')) > 0) {
 		$reporter->notice("Destination dir is not empty!");
 	}
 
 	$dpFiles = $dp->mapToFileNames(array_keys($dependencies));
+	foreach ($dependencies as $dependency) {
+		foreach ($dependency->where as $where) {
+			if (isset($where->file)) {
+				$dpFiles[] = $where->file;
+			}
+		}
+	}
 
 	$reporter->stdout("Copying " . count($dpFiles) . " files to '$dstDir'.\n");
 	foreach ($dpFiles as $file) {
@@ -240,6 +252,6 @@ if (!empty($dstDir)) {
 			continue;
 		}
 
-		$fnCopy($file, $dstDir . $dstPath);
+		$fnCopy($file, $dstDir . DIRECTORY_SEPARATOR . $dstPath);
 	}
 }

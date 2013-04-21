@@ -19,7 +19,9 @@ class Dependencies extends Nette\Object
 		TYPE_INSTANCE_OF = 'instanceOf',
 		TYPE_NEW_OPERATOR = 'newOperator',
 		TYPE_STATIC_CALL = 'staticCall',
-		TYPE_TYPEHINT = 'typehint';
+		TYPE_TYPEHINT = 'typehint',
+		TYPE_REQUIRE = 'require',
+		TYPE_INCLUDE = 'include';
 
 	/**
 	 * Dependencies tree array keys.
@@ -65,7 +67,7 @@ class Dependencies extends Nette\Object
 	 * where every self::DEPENDENCIES array is:
 	 * <code>
 	 * array(
-	 *     self::TYPE_EXTENDS => array(lowerClassName => originalClassName),
+	 *     self::TYPE_EXTENDS => array(lowerCasedValue => value),
 	 *     self::TYPE_... => ...
 	 * )
 	 * </code>
@@ -102,6 +104,9 @@ class Dependencies extends Nette\Object
 
 	/** @var array[lowerClassName => TRUE]  class ignored during dependency queries */
 	private $ignoredClasses = array();
+
+	/** @var array  expanded require/include file expression */
+	private $fileExpressions = array();
 
 
 
@@ -243,6 +248,12 @@ class Dependencies extends Nette\Object
 						$this->found(self::TYPE_TYPEHINT, $namespace->absolutize($class));
 					}
 				}
+
+			} elseif ($parser->isCurrent(T_REQUIRE, T_REQUIRE_ONCE)) {
+				$this->found(self::TYPE_REQUIRE, $parser->fetchUntil(';'));
+
+			} elseif ($parser->isCurrent(T_INCLUDE, T_INCLUDE_ONCE)) {
+				$this->found(self::TYPE_INCLUDE, $parser->fetchUntil(';'));
 			}
 		}
 
@@ -436,7 +447,7 @@ class Dependencies extends Nette\Object
 
 
 	/**
-	 * Store found dependencies into files.
+	 * Store found dependencies into file.
 	 * @param  string  path
 	 * @return bool
 	 */
@@ -582,19 +593,19 @@ class Dependencies extends Nette\Object
 					continue;
 				}
 
-				foreach ($dependencies as $lowerClass => $camelClass) {
-					if (isset($this->ignoredClasses[$lowerClass])) {
+				foreach ($dependencies as $lowerValue => $value) {
+					if (isset($this->ignoredClasses[$lowerValue])) {
 						continue;
 					}
 
-					$key = "$lowerClass:$type";
+					$key = "class:$lowerValue:$type";
 					if (!isset($result[$class->lower]->where[$key])) {
 						$result[$class->lower]->where[$key] = (object) array(
 							'type' => $type,
-							'class' => $camelClass,
+							'class' => $value,
 						);
 
-						$this->collectClass(new CIString($camelClass), $types, $result);
+						$this->collectClass(new CIString($value), $types, $result);
 					}
 				}
 			}
@@ -608,26 +619,81 @@ class Dependencies extends Nette\Object
 							continue;
 						}
 
-						foreach ($dependencies as $lowerClass => $camelClass) {
-							if (isset($this->ignoredClasses[$lowerClass])) {
+						foreach ($dependencies as $lowerValue => $value) {
+							if ($type === self::TYPE_REQUIRE || $type === self::TYPE_INCLUDE) {
+								if (($dstFile = $this->expandFileExpression($file, $value)) === FALSE) {
+									continue;
+								}
+
+								$key = "file:$dstFile:$type:$lowerMethod";
+								if (!isset($result[$class->lower]->where[$key])) {
+									$result[$class->lower]->where[$key] = (object) array(
+										'type' => $type,
+										'file' => $dstFile,
+										'method' => $method[self::NAME],
+									);
+								}
 								continue;
 							}
 
-							$key = "$lowerClass:$type:$lowerMethod";
+							if (isset($this->ignoredClasses[$lowerValue])) {
+								continue;
+							}
+
+							$key = "class:$lowerValue:$type:$lowerMethod";
 							if (!isset($result[$class->lower]->where[$key])) {
 								$result[$class->lower]->where[$key] = (object) array(
 									'type' => $type,
-									'class' => $camelClass,
+									'class' => $value,
 									'method' => $method[self::NAME],
 								);
 
-								$this->collectClass(new CIString($camelClass), $types, $result);
+								$this->collectClass(new CIString($value), $types, $result);
 							}
 						}
 					}
 				}
 			}
 		}
+	}
+
+
+
+	/**
+	 * @return string|FALSE
+	 */
+	private function expandFileExpression($inFile, $expression)
+	{
+		$key = "$inFile:$expression";
+		if (isset($this->fileExpressions[$key])) {
+			return $this->fileExpressions[$key];
+		}
+
+		$file = '';
+		$parser = new PhpParser("<?php $expression");
+		while (($token = $parser->fetch()) !== FALSE) {
+			if ($parser->isCurrent(T_OPEN_TAG, T_COMMENT, T_DOC_COMMENT, T_WHITESPACE, '.')) {
+				continue;
+
+			} elseif ($parser->isCurrent(T_DIR)) {
+				$file .= dirname($inFile);
+
+			} elseif ($parser->isCurrent(T_CONSTANT_ENCAPSED_STRING)) {
+				$file .= substr($token, 1, -1);
+
+			} else {
+				$file = FALSE;
+				break;
+			}
+		}
+
+		if ($file === FALSE) {
+			$this->reporter->warning("Expression '$expression' in file '$inFile' cannot be evaluated. Copy file manually if is desired.");
+		} elseif (!is_file($file)) {
+			$this->reporter->warning("File '$file' evaluated from expression '$expression' does not exists.");
+		}
+
+		return $this->fileExpressions[$key] = $file === FALSE ? FALSE : realpath($file);
 	}
 
 

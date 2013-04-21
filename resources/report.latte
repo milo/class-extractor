@@ -66,7 +66,7 @@
 				padding-left: 5em;
 			}
 
-			header span, td.type, td.class span {
+			header span, td.type, td.value span {
 				color: #777;
 				font-size: 90%;
 			}
@@ -97,7 +97,14 @@
 			</tr>
 			<tr n:foreach="$dp->where as $where">
 				<td class="type">{$where->type}</td>
-				<td class="class"><a n:tag-if="isset($dependencies[strtolower($where->class)])" href='#class-{$where->class |webalize}'>{$where->class}</a>{ifset $where->method} <span>in {$where->method}()</span>{/ifset}</td>
+				<td class="value">
+					{ifset $where->file}
+						{$where->file |stripSrcDir}
+					{else}
+						<a n:tag-if="isset($dependencies[strtolower($where->class)])" href='#class-{$where->class |webalize}'>{$where->class}{$where->file}</a>
+					{/ifset}
+					{ifset $where->method} <span>in {$where->method}()</span>{/ifset}
+				</td>
 			</tr>
 		</table>
 		<p n:if="empty($dependencies)">
